@@ -1,0 +1,22 @@
+{
+    "name": "plisio/module-plisio",
+    "description": "",
+    "type": "magento2-module",
+    "license": "MIT",
+    "authors": [
+        {
+            "email": "plugins@plisio.net",
+            "name": "PlisioDev"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {},
+    "autoload": {
+        "files": [
+            "registration.php"
+        ],
+        "psr-4": {
+            "Plisio\\PlisioGateway\\": ""
+        }
+    }
+}

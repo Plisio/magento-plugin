@@ -3,6 +3,7 @@
     "description": "",
     "type": "magento2-module",
     "license": "MIT",
+    "version": "1.0.0",
     "authors": [
         {
             "email": "plugins@plisio.net",

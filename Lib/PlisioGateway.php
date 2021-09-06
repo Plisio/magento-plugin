@@ -4,61 +4,150 @@ namespace Plisio\PlisioGateway\Lib;
 
 class PlisioGateway
 {
-    const VERSION = '1.0.0';
-    const USER_AGENT_ORIGIN = 'Plisio PHP Library';
+    protected $secretKey = '';
+    public $apiEndPoint = 'https://plisio.net/api/v1';
 
-    public static $user_agent = '';
-    public static $curlopt_ssl_verifypeer = false;
-
-    public static function config($authentication)
+    public function __construct($secretKey)
     {
-        if (isset($authentication['user_agent'])) {
-            self::$user_agent = $authentication['user_agent'];
+        $this->secretKey = $secretKey;
+    }
+
+    protected function getApiUrl($commandUrl)
+    {
+        return trim($this->apiEndPoint, '/') . '/' . $commandUrl;
+    }
+
+    public function getBalances($currency)
+    {
+        return $this->apiCall('balances', ['currency' => $currency]);
+    }
+
+    public function getShopInfo()
+    {
+        return $this->apiCall('shops');
+    }
+
+    public function getCurrencies($source_currency = 'USD')
+    {
+        $currencies = $this->guestApiCall("currencies/$source_currency");
+        return array_filter($currencies['data'], function ($currency) {
+            return $currency['hidden'] == 0;
+        });
+    }
+
+    public function createTransaction($req)
+    {
+        return $this->apiCall('invoices/new', $req);
+    }
+
+    /**
+     * Creates a withdrawal from your account to a specified address.<br />
+     * @param amount The amount of the transaction (floating point to 8 decimals).
+     * @param currency The cryptocurrency to withdraw.
+     * @param address The address to send the coins to.
+     * @param auto_confirm If auto_confirm is TRUE, then the withdrawal will be performed without an email confirmation.
+     */
+    public function createWithdrawal($amount, $currency, $address)
+    {
+        $req = [
+            'currency' => $currency,
+            'amount' => $amount,
+            'to' => $address,
+            'type' => 'cash_out',
+        ];
+        return $this->apiCall('operations/withdraw', $req);
+    }
+
+    /**
+     * Creates a withdrawal from your account to a specified address.<br />
+     * @param payments array of addresses and amounts.
+     * @param currency The cryptocurrency to withdraw.
+     */
+    public function createMassWithdrawal($payments, $currency)
+    {
+        $req = [
+            'currency' => $currency,
+            'amount' => implode(',', array_values($payments)),
+            'to' => implode(',', array_keys($payments)),
+            'type' => 'mass_cash_out',
+        ];
+        return $this->apiCall('operations/withdraw', $req);
+    }
+
+    private function isSetup()
+    {
+        return !empty($this->secretKey);
+    }
+
+    protected function getCurlOptions($url)
+    {
+        return [
+            CURLOPT_URL => $url,
+            CURLOPT_HTTPGET => true,
+            CURLOPT_FAILONERROR => false,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_HEADER => true,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Accept: application/json'
+            ],
+        ];
+    }
+
+    private function apiCall($cmd, $req = [])
+    {
+        if (!$this->isSetup()) {
+            return ['error' => 'You have not called the Setup function with your private and public keys!'];
+        }
+        return $this->guestApiCall($cmd, $req);
+    }
+
+    private function guestApiCall($cmd, $req = [])
+    {
+        // Generate the query string
+        $queryString = '';
+        if (!empty($this->secretKey)) {
+            $req['api_key'] = $this->secretKey;
+        }
+        if (!empty($req)) {
+            $post_data = http_build_query($req, '', '&');
+            $queryString = '?' . $post_data;
         }
 
-        if (isset($authentication['curlopt_ssl_verifypeer'])) {
-            self::$curlopt_ssl_verifypeer = $authentication['curlopt_ssl_verifypeer'];
+        try {
+            $apiUrl = $this->getApiUrl($cmd . $queryString);
+
+            $ch = curl_init();
+            curl_setopt_array($ch, $this->getCurlOptions($apiUrl));
+            $data = curl_exec($ch);
+
+            if ($data !== false) {
+                $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+                $body = substr($data, $header_size);
+                $dec = $this->jsonDecode($body);
+                if ($dec !== null && count($dec)) {
+                    return $dec;
+                } else {
+                    // If you are using PHP 5.5.0 or higher you can use json_last_error_msg() for a better error message
+                    return ['status' => 'error', 'message' => 'Unable to parse JSON result (' . json_last_error() . ')'];
+                }
+            } else {
+                return ['status' => 'error', 'message' => 'cURL error: ' . curl_error($ch)];
+            }
+        } catch (\Exception $e) {
+            return ['status' => 'error', 'message' => 'Could not send request to API : ' . $apiUrl];
         }
     }
 
-    public static function request($urlPart, $method = 'GET', $params = array(), $authentication = array())
+    private function jsonDecode($data)
     {
-        $user_agent = isset($authentication['user_agent']) ? $authentication['user_agent'] : (isset(self::$user_agent)
-            ? self::$user_agent : (self::USER_AGENT_ORIGIN . ' v' . self::VERSION));
-        $curlopt_ssl_verifypeer = isset($authentication['curlopt_ssl_verifypeer'])
-            ? $authentication['curlopt_ssl_verifypeer'] : self::$curlopt_ssl_verifypeer;
-
-        $url = 'https://plisio.net/api/v1/invoices/new'."?".http_build_query($params);
-        $headers = array();
-        $curl = curl_init();
-
-        $curl_options = array(
-            CURLOPT_RETURNTRANSFER => 1,
-            CURLOPT_URL => $url
-        );
-
-        if ($method == 'POST') {
-            $headers[] = 'Content-Type: application/x-www-form-urlencoded';
-            array_merge($curl_options, array(CURLOPT_POST => 1));
-            curl_setopt($curl, CURLOPT_POSTFIELDS, http_build_query($params));
-        }
-
-
-        curl_setopt_array($curl, $curl_options);
-        curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($curl, CURLOPT_USERAGENT, $user_agent);
-        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, $curlopt_ssl_verifypeer);
-
-
-        $raw_response = curl_exec($curl);
-        $decoded_response = json_decode($raw_response, true);
-        $response = $decoded_response ? $decoded_response : $raw_response;
-        $http_status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-
-        if ($http_status === 200) {
-            return $response;
+        if (PHP_INT_SIZE < 8 && version_compare(PHP_VERSION, '5.4.0') >= 0) {
+            // We are on 32-bit PHP, so use the bigint as string option. If you are using any API calls with Satoshis it is highly NOT recommended to use 32-bit PHP
+            $dec = json_decode($data, true, 512, JSON_BIGINT_AS_STRING);
         } else {
-            \Plisio\PlisioGateway\Lib\Exception::throwException($http_status, $response);
+            $dec = json_decode($data, true);
         }
+        return $dec;
     }
 }

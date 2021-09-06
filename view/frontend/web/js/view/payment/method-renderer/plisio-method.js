@@ -8,6 +8,7 @@
      'Magento_Checkout/js/checkout-data',
      'Magento_Checkout/js/model/payment/additional-validators',
      'mage/url',
+     'Magento_Ui/js/model/messageList'
  ],
  function (
      $,
@@ -17,7 +18,8 @@
      customer,
      checkoutData,
      additionalValidators,
-     url) {
+     url,
+     globalMessageList) {
      'use strict';
 
 
@@ -68,7 +70,9 @@
                  if (response.status) {
                      window.location.replace(response.data.invoice_url);
                  } else {
-                     window.location.replace('checkout/cart');
+                     globalMessageList.addErrorMessage({
+                         message: response.message
+                     });
                  }
              });
          }

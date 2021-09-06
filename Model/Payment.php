@@ -2,8 +2,6 @@
 
 namespace Plisio\PlisioGateway\Model;
 
-use Plisio\PlisioGateway\Lib\PlisioGateway;
-use Plisio\PlisioGateway\Lib\Plisio;
 use Magento\Directory\Model\CountryFactory;
 use Magento\Framework\Api\AttributeValueFactory;
 use Magento\Framework\Api\ExtensionAttributesFactory;
@@ -19,13 +17,15 @@ use Magento\Framework\UrlInterface;
 use Magento\Payment\Helper\Data;
 use Magento\Payment\Model\Method\AbstractMethod;
 use Magento\Payment\Model\Method\Logger;
+use Magento\Sales\Api\OrderManagementInterface;
 use Magento\Sales\Model\Order;
 use Magento\Store\Model\StoreManagerInterface;
-use Magento\Sales\Api\OrderManagementInterface;
+use Magento\Framework\Message\ManagerInterface;
+use Plisio\PlisioGateway\Lib\PlisioGateway;
 
 class Payment extends AbstractMethod
 {
-    const PLISIO_MAGENTO_VERSION = '1.0.0';
+    const PLISIO_MAGENTO_VERSION = '1.0.1';
     const CODE = 'plisio_plisiogateway';
 
     protected $_code = 'plisio_plisiogateway';
@@ -33,9 +33,10 @@ class Payment extends AbstractMethod
     protected $_isInitializeNeeded = true;
 
     protected $urlBuilder;
-    protected $plisio;
+    private $plisio;
     protected $storeManager;
     protected $orderManagement;
+    protected $messageManager;
 
     /**
      * @param Context $context
@@ -45,7 +46,6 @@ class Payment extends AbstractMethod
      * @param Data $paymentData
      * @param ScopeConfigInterface $scopeConfig
      * @param Logger $logger
-     * @param Plisio $plisio
      * @param UrlInterface $urlBuilder
      * @param StoreManagerInterface $storeManager
      * @param AbstractResource|null $resource
@@ -68,11 +68,10 @@ class Payment extends AbstractMethod
         UrlInterface $urlBuilder,
         StoreManagerInterface $storeManager,
         OrderManagementInterface $orderManagement,
-        Plisio $plisio,
+        ManagerInterface $messageManager,
         array $data = [],
         AbstractResource $resource = null,
         AbstractDb $resourceCollection = null
-
     ) {
         parent::__construct(
             $context,
@@ -90,11 +89,17 @@ class Payment extends AbstractMethod
         $this->urlBuilder = $urlBuilder;
         $this->storeManager = $storeManager;
         $this->orderManagement = $orderManagement;
-        $this->plisio = $plisio;
+        $this->messageManager = $messageManager;
+        $this->plisio = new PlisioGateway($this->getConfigData('api_auth_token'));
+    }
 
-        PlisioGateway::config([
-            'user_agent'  => 'Plisio - Magento 2 Extension v' . self::PLISIO_MAGENTO_VERSION
-        ]);
+    private function get_plisio_receive_currencies($source_currency)
+    {
+        $currencies = $this->plisio->getCurrencies($source_currency);
+        return array_reduce($currencies, function ($acc, $curr) {
+            $acc[$curr['cid']] = $curr;
+            return $acc;
+        }, []);
     }
 
     /**
@@ -103,11 +108,8 @@ class Payment extends AbstractMethod
      */
     public function getPlisioRequest(Order $order)
     {
-        $token = substr(md5(rand()), 0, 32);
-
-        $payment = $order->getPayment();
-        $payment->setAdditionalInformation('plisio_order_token', $token);
-        $payment->save();
+        $plisio_receive_currencies = $this->get_plisio_receive_currencies($order->getOrderCurrencyCode());
+        $plisio_receive_cids = array_keys($plisio_receive_currencies);
 
         $description = [];
         foreach ($order->getAllItems() as $item) {
@@ -119,31 +121,29 @@ class Payment extends AbstractMethod
             'order_name' => $order->getIncrementId(),
             'source_amount' => number_format($order->getGrandTotal(), 2, '.', ''),
             'source_currency' => $order->getOrderCurrencyCode(),
-            'allowed_psys_cids' => $this->getConfigData('receive_currency'),
-            'currency' => explode(',',$this->getConfigData('receive_currency'))[0],
+            'currency' => $plisio_receive_cids[0],
             'callback_url' => $this->urlBuilder->getUrl('plisio/payment/callback'),
             'cancel_url' => $this->urlBuilder->getUrl('plisio/payment/cancelOrder'),
             'success_url' => $this->urlBuilder->getUrl('plisio/payment/returnAction'),
-            'description' => join($description, ', '),
-            'token' => $payment->getAdditionalInformation('plisio_order_token'),
+            'description' => implode(', ', $description),
             'email' => $order->getShippingAddress()->getEmail(),
             'plugin' => 'Magento',
-            'version' => '1.0.0',
-            'api_key' => $this->getConfigData('api_auth_token')
+            'version' => self::PLISIO_MAGENTO_VERSION,
         ];
 
-        $plOrder = Plisio\Order::create($params);
+        $plOrder = $this->plisio->createTransaction($params);
 
-        if ($plOrder) {
+        if (!empty($plOrder['data']['invoice_url'])) {
             return [
                 'status' => true,
                 'data' => [
-                    'invoice_url' => $plOrder->data["invoice_url"]
+                    'invoice_url' => $plOrder["data"]["invoice_url"]
                     ],
             ];
         } else {
             return [
-                'status' => false
+                'status' => false,
+                'message' => json_decode($plOrder['data']['message'], true)['amount']
             ];
         }
     }
@@ -155,15 +155,16 @@ class Payment extends AbstractMethod
     {
         try {
             if (!$order || !$order->getIncrementId()) {
-                $request_order_number = (filter_input(INPUT_POST, 'order_number')
-                    ? filter_input(INPUT_POST, 'order_number') : filter_input(INPUT_GET, 'order_number')
+                $request_order_number = (
+                    filter_input(INPUT_POST, 'order_number')
+                    ?: filter_input(INPUT_GET, 'order_number')
                 );
 
                 throw new \Exception('Order #' . $request_order_number . ' does not exists');
             }
 
             $request_txn_id = (filter_input(INPUT_POST, 'txn_id')
-                ? filter_input(INPUT_POST, 'txn_id') :  filter_input(INPUT_GET, 'txn_id'));
+                ?: filter_input(INPUT_GET, 'txn_id'));
             $plOrder = $_POST;
 
             if (!$plOrder) {
@@ -176,7 +177,6 @@ class Payment extends AbstractMethod
                 $order->save();
             } elseif (in_array($plOrder['status'], ['expired', 'cancelled', 'error'])) {
                 $this->orderManagement->cancel($plOrder['order_number']);
-
             }
         } catch (\Exception $e) {
             $this->_logger->error($e);
